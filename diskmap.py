@@ -222,10 +222,10 @@ _libc.getattrlistbulk.argtypes = [ctypes.c_int, ctypes.POINTER(_AttrList), ctype
                                   ctypes.c_size_t, ctypes.c_uint64]
 _libc.getattrlistbulk.restype = ctypes.c_int
 _CMN_NAME, _CMN_DEVID, _CMN_OBJTYPE, _CMN_MODTIME = 0x1, 0x2, 0x8, 0x400
-_CMN_FILEID, _CMN_ERROR, _CMN_RETURNED = 0x02000000, 0x20000000, 0x80000000
+_CMN_FILEID, _CMN_ADDEDTIME, _CMN_ERROR, _CMN_RETURNED = 0x02000000, 0x10000000, 0x20000000, 0x80000000
 _FILE_LINKCOUNT, _FILE_TOTALSIZE, _FILE_ALLOCSIZE = 0x1, 0x2, 0x4
 _ATTRS = _AttrList(5, 0, _CMN_RETURNED | _CMN_NAME | _CMN_DEVID | _CMN_OBJTYPE | _CMN_MODTIME
-                   | _CMN_FILEID | _CMN_ERROR, 0, 0,
+                   | _CMN_FILEID | _CMN_ADDEDTIME | _CMN_ERROR, 0, 0,
                    _FILE_LINKCOUNT | _FILE_TOTALSIZE | _FILE_ALLOCSIZE, 0)
 _BUF_SIZE = 256 * 1024
 _buf = None
@@ -271,6 +271,10 @@ def _listdir_bulk(path):
                 if cmn & _CMN_FILEID:
                     ino, = unpack("Q", raw, p)
                     p += 8
+                if cmn & _CMN_ADDEDTIME:  # when it arrived in this folder (Finder's "Date Added")
+                    sec, nsec = unpack("qq", raw, p)
+                    mtime = max(mtime, sec + nsec / 1e9)
+                    p += 16
                 if cmn & _CMN_ERROR:
                     err, = unpack("I", raw, p)
                     p += 4
@@ -286,6 +290,47 @@ def _listdir_bulk(path):
                 out.append((name or "?", VNON if err else typ, dev, mtime, ino, nlink, size, alloc))
     finally:
         os.close(fd)
+
+
+_libc.getattrlist.argtypes = [ctypes.c_char_p, ctypes.POINTER(_AttrList), ctypes.c_void_p,
+                              ctypes.c_size_t, ctypes.c_uint64]
+_CMNEXT_PRIVATESIZE, _CMNEXT_CLONEID, _FSOPT_ATTR_CMN_EXTENDED = 0x8, 0x100, 0x20
+_CLONE_ATTRS = _AttrList(5, 0, _CMN_RETURNED, 0, 0, _FILE_ALLOCSIZE,
+                         _CMNEXT_PRIVATESIZE | _CMNEXT_CLONEID)
+
+
+def clone_info(path):
+    """(allocated, private, clone_id) for a file. `private` is the space not shared with APFS
+    clones, i.e. what deleting the file would actually free. None if unavailable."""
+    buf = ctypes.create_string_buffer(128)
+    if _libc.getattrlist(os.fsencode(path), ctypes.byref(_CLONE_ATTRS), buf, 128,
+                         _FSOPT_ATTR_CMN_EXTENDED):
+        return None
+    _len, _c, _v, _d, fil, ext = struct.unpack_from("I5I", buf.raw, 0)
+    p, alloc, private, clone = 24, None, None, None
+    if fil & _FILE_ALLOCSIZE:
+        alloc, = struct.unpack_from("q", buf.raw, p)
+        p += 8
+    if ext & _CMNEXT_PRIVATESIZE:
+        private, = struct.unpack_from("q", buf.raw, p)
+        p += 8
+    if ext & _CMNEXT_CLONEID:
+        clone, = struct.unpack_from("Q", buf.raw, p)
+    if alloc is None or private is None:
+        return None
+    return alloc, private, clone
+
+
+def real_extra(paths, size):
+    """Space the extra copies really use, counting clone families' shared blocks once."""
+    infos = [clone_info(p) for p in paths]
+    if any(i is None for i in infos):
+        return size * (len(paths) - 1), False
+    shared = {}
+    for alloc, private, clone in infos:
+        shared[clone] = max(shared.get(clone, 0), alloc - private)
+    used = sum(i[1] for i in infos) + sum(shared.values())
+    return max(0, used - max(i[0] for i in infos)), len(shared) < len(infos)
 
 
 def _listdir_stat(path):
@@ -304,7 +349,8 @@ def _listdir_stat(path):
 
 
 def listdir(path):
-    """[(name, type, dev, mtime, inode, nlink, logical_size, allocated_bytes)] for a directory."""
+    """[(name, type, dev, changed, inode, nlink, logical_size, allocated_bytes)] for a directory.
+    `changed` is the later of modified and date-added time."""
     try:
         return _listdir_bulk(path)
     except OSError as e:
@@ -338,6 +384,10 @@ def _dupe_task(size, paths):
     return dupe_groups(size, paths)
 
 
+def _dir_dupe_task(size, paths):
+    return verify_dupe_dirs(size, paths)
+
+
 class Inline:
     """Stands in for a process pool when running with --jobs 1."""
     def submit(self, fn, *args):
@@ -351,10 +401,10 @@ class Inline:
 
 class Deferred:
     """A folder near the root whose children are still being scanned by workers."""
-    __slots__ = ("name", "path", "rule", "kids")
+    __slots__ = ("name", "path", "rule", "junk", "kids")
 
-    def __init__(self, name, path, rule, kids):
-        self.name, self.path, self.rule, self.kids = name, path, rule, kids
+    def __init__(self, name, path, rule, junk, kids):
+        self.name, self.path, self.rule, self.junk, self.kids = name, path, rule, junk, kids
 
 
 # --------------------------------------------------------------------- scanner
@@ -370,6 +420,7 @@ class Scanner:
         self.types = defaultdict(lambda: [0, 0])   # category -> [bytes, count]
         self.largest = []                          # min-heap of (size, path)
         self.by_size = defaultdict(list)           # logical size -> [paths]
+        self.dir_sigs = defaultdict(list)          # folder signature -> [(size, path)]
         self.denied = []
         self.files = self.dirs = self.errors = 0
         self.bytes = 0
@@ -449,25 +500,34 @@ class Scanner:
                     kids.append(self.walk(p, junk, depth + 1))
             elif typ == VREG:
                 s, cat = self.file(p, ename, dev, mtime, ino, nlink, size, alloc, junk)
-                kids.append((s, {"n": ename, "s": s, "t": cat}))
+                kids.append((s, {"n": ename, "s": s, "t": cat, "m": int(mtime), "_l": size}))
             elif typ == VNON:
                 self.errors += 1
             # symlinks, sockets, devices are skipped
         if self.pool:
-            return Deferred(name, path, rule, kids)
-        return self.finish(name, path, rule, kids)
+            return Deferred(name, path, rule, junk, kids)
+        return self.finish(name, path, rule, junk, kids)
 
-    def finish(self, name, path, rule, kids):
+    def finish(self, name, path, rule, junk, kids):
         total = small_size = small_count = 0
+        newest = 0
         keep = []
-        for size, child in kids:
+        sig = hashlib.blake2b(digest_size=12)  # names + sizes of everything inside
+        for size, child in sorted(kids, key=lambda k: k[1]["n"] if k[1] else ""):
             total += size
+            if child is not None:
+                newest = max(newest, child.get("m", 0))
+                sig.update(f"{child['n']}\0{child.get('_l', child.get('_h'))}\0".encode(errors="surrogateescape"))
             if child is not None and size >= self.o.min_size:
                 keep.append(child)
             elif size:
                 small_size += size
                 small_count += 1
-        node = {"n": name, "s": total, "d": 1}
+        node = {"n": name, "s": total, "d": 1, "_h": sig.hexdigest()}
+        if newest:
+            node["m"] = newest
+        if not junk and total >= DUPE_DIR_MIN:
+            self.dir_sigs[node["_h"]].append((total, path))
         if rule:
             node["j"] = rule
             self.findings[rule].append((total, path))
@@ -512,6 +572,7 @@ class Scanner:
                 "errors": self.errors, "bytes": self.bytes, "data_bytes": self.data_bytes,
                 "findings": dict(self.findings), "types": dict(self.types),
                 "largest": self.largest, "by_size": dict(self.by_size),
+                "dir_sigs": dict(self.dir_sigs),
                 "denied": self.denied, "links": self.links}
 
     def merge(self, r):
@@ -529,6 +590,8 @@ class Scanner:
                 heapq.heapreplace(self.largest, item)
         for size, paths in r["by_size"].items():
             self.by_size[size].extend(paths)
+        for sig, items in r["dir_sigs"].items():
+            self.dir_sigs[sig].extend(items)
         self.denied.extend(r["denied"])
         self.worker_links.append(r["links"])
 
@@ -536,7 +599,8 @@ class Scanner:
         if isinstance(item, Future):
             return self.results[item]
         if isinstance(item, Deferred):
-            return self.finish(item.name, item.path, item.rule, [self.resolve(k) for k in item.kids])
+            return self.finish(item.name, item.path, item.rule, item.junk,
+                               [self.resolve(k) for k in item.kids])
         return item
 
     def uncount(self, tree, path, size, dev):
@@ -601,6 +665,7 @@ class Scanner:
 # ------------------------------------------------------------------ duplicates
 SAMPLE_CHUNKS, SAMPLE_SIZE = 16, 64 * 1024  # 1 MB read per file for the first pass
 FULL_HASH_MAX = 512e6                       # bigger files are compared by samples only
+DUPE_DIR_MIN = 50e6                         # smallest folder checked for duplicate copies
 
 
 def _hash(path, size, sampled):
@@ -641,7 +706,9 @@ def dupe_groups(size, paths):
                     full[h].append(p)
         for ps in full.values():
             if len(ps) > 1:
-                groups.append({"size": size, "paths": sorted(ps), "sampled": sampled})
+                extra, clones = real_extra(ps, size)
+                groups.append({"size": size, "paths": sorted(ps), "sampled": sampled,
+                               "wasted": extra, "clones": clones})
     return groups
 
 
@@ -652,8 +719,98 @@ def find_dupes(by_size, pool):
         sys.stderr.write(f"\r\033[K  checking duplicates {i + 1}/{len(futures)}")
         groups.extend(fut.result())
     sys.stderr.write("\r\033[K")
-    groups.sort(key=lambda g: -g["size"] * (len(g["paths"]) - 1))
+    groups.sort(key=lambda g: (-g["wasted"], -g["size"]))
     return groups[:300]
+
+
+def _files_under(path):
+    """{relative path: logical size} for every file below `path`."""
+    files, stack = {}, [path]
+    while stack:
+        d = stack.pop()
+        for name, typ, _dev, _mtime, _ino, _nlink, size, _alloc in listdir(d):
+            p = os.path.join(d, name)
+            if typ == VDIR:
+                stack.append(p)
+            elif typ == VREG:
+                files[os.path.relpath(p, path)] = size
+    return files
+
+
+def verify_dupe_dirs(size, paths):
+    """Folders whose names and sizes match: confirm by comparing the biggest files' contents,
+    and estimate how much space the extra copies really take (APFS clones share blocks)."""
+    try:
+        listings = [_files_under(p) for p in paths]
+    except OSError:
+        return None
+    first = listings[0]
+    if not first or any(lst != first for lst in listings[1:]):
+        return None
+    biggest = sorted(first, key=first.get, reverse=True)[:50]
+    for rel in biggest[:8]:
+        if len({_hash(os.path.join(p, rel), first[rel], True) for p in paths}) != 1:
+            return None
+    copies = len(paths) - 1
+    sampled = sum(first[r] for r in biggest) * copies
+    extra = sum(real_extra([os.path.join(p, r) for p in paths], first[r])[0] for r in biggest)
+    ratio = min(1, extra / sampled) if sampled else 1
+    return {"size": size, "paths": paths, "files": len(first),
+            "wasted": int(size * copies * ratio), "clones": extra < sampled}
+
+
+def find_dupe_dirs(dir_sigs, pool):
+    """Whole folders that exist more than once. Only the outermost copy is listed: two copies
+    of a project aren't also reported as duplicate src/, docs/ …"""
+    candidates = sorted(((min(s for s, _ in items), sorted(p for _, p in items))
+                         for items in dir_sigs.values() if len(items) > 1), reverse=True)
+    chosen, covered = [], []
+    for size, paths in candidates:
+        if all(any(p.startswith(c + "/") for c in covered) for p in paths):
+            continue
+        chosen.append((size, paths))
+        covered.extend(paths)
+        if len(chosen) >= 100:
+            break
+    futures = [pool.submit(_dir_dupe_task, size, paths) for size, paths in chosen]
+    groups = []
+    for i, fut in enumerate(as_completed(futures)):
+        sys.stderr.write(f"\r\033[K  checking duplicate folders {i + 1}/{len(futures)}")
+        if fut.result():
+            groups.append(fut.result())
+    sys.stderr.write("\r\033[K")
+    groups.sort(key=lambda g: (-g["wasted"], -g["size"]))
+    return groups
+
+
+# ------------------------------------------------------------- untouched folders
+UNTOUCHED_MIN = 100e6
+
+
+def untouched_folders(tree, cutoff):
+    """The outermost folders over 100 MB where nothing was modified or added since `cutoff`."""
+    out = []
+    stack = [(c, os.path.join(tree["n"], c["n"]), False) for c in tree.get("c", ()) if not c.get("o")]
+    while stack:
+        n, p, inside = stack.pop()
+        stale = bool(n.get("d")) and 0 < n.get("m", 0) < cutoff
+        if stale and not inside and n["s"] >= UNTOUCHED_MIN and not n["n"].endswith(".app"):
+            out.append([n["s"], p, n["m"]])
+        for c in n.get("c", ()):
+            if not c.get("o"):
+                stack.append((c, os.path.join(p, c["n"]), inside or stale))
+    out.sort(reverse=True)
+    return out[:150]
+
+
+def strip_private(tree):
+    """Drop the scan-only fields (signatures, logical sizes) before writing the report."""
+    stack = [tree]
+    while stack:
+        n = stack.pop()
+        n.pop("_h", None)
+        n.pop("_l", None)
+        stack.extend(n.get("c", ()))
 
 
 # ------------------------------------------------------------- disk accounting
@@ -934,6 +1091,8 @@ def main():
     ap.add_argument("--one-fs", action="store_true", help="don't cross into other volumes")
     ap.add_argument("--no-dupes", action="store_true", help="skip duplicate-file detection")
     ap.add_argument("--dupe-min", default="20M", help="smallest file checked for duplicates")
+    ap.add_argument("--untouched-days", type=int, default=365,
+                    help="folders with nothing modified or added for this long are listed (default 365)")
     ap.add_argument("--out", default=os.path.join(HERE, "report"), help="report folder")
     ap.add_argument("--open", action="store_true", help="open the report when done")
     ap.add_argument("--compare", default="latest", metavar="WHEN",
@@ -982,10 +1141,16 @@ def main():
 
         t = time.time()
         dupes = [] if args.no_dupes else find_dupes(sc.by_size, pool)
+        dupe_dirs = [] if args.no_dupes else find_dupe_dirs(sc.dir_sigs, pool)
+        # files inside duplicate folders are already covered by the folder entry
+        inside = [p + "/" for g in dupe_dirs for p in g["paths"]]
+        dupes = [g for g in dupes if not all(any(p.startswith(i) for i in inside) for p in g["paths"])]
         timing["duplicates"] = time.time() - t
     finally:
         pool.shutdown(cancel_futures=True)
     t = time.time()
+    untouched = untouched_folders(tree, opts.now - args.untouched_days * 86400)
+    strip_private(tree)
 
     history = None
     if not args.no_history:
@@ -1030,6 +1195,8 @@ def main():
         "types": dict(sc.types),
         "largest": sorted(sc.largest, reverse=True),
         "dupes": dupes,
+        "dupeDirs": dupe_dirs,
+        "untouched": {"days": args.untouched_days, "items": untouched},
         "denied": sc.denied[:500],
         "deniedCount": len(sc.denied),
         "tree": tree,

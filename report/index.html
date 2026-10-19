@@ -27,7 +27,7 @@
   .bar > i { display: block; height: 100%; background: var(--accent); }
   .spacer { flex: 1; }
   .search { position: relative; }
-  .search input { width: 240px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--line);
+  .search input { width: 200px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--line);
     background: var(--bg); outline: none; }
   .search input:focus { border-color: var(--accent); }
   #results { position: absolute; z-index: 20; top: 32px; right: 0; width: 460px; max-height: 60vh;
@@ -57,6 +57,7 @@
   .cell.hit { outline: 2px solid var(--hit); outline-offset: -2px; z-index: 2; }
   .cell.sel { outline: 2px solid #fff; outline-offset: -2px; z-index: 3; }
   .cell:hover { filter: brightness(1.15); }
+  #map:not([data-mode=folder]) .cell { box-shadow: inset 0 0 0 1px #ffffff14; }
   #tip { position: fixed; z-index: 30; pointer-events: none; max-width: 460px; padding: 8px 10px;
     background: #0b0d10ee; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
   #tip .p { color: var(--muted); word-break: break-all; }
@@ -65,7 +66,7 @@
   aside { border-left: 1px solid var(--line); background: var(--panel); display: flex;
     flex-direction: column; min-height: 0; }
   .tabs { display: flex; border-bottom: 1px solid var(--line); overflow-x: auto; }
-  .tabs button { flex: 1; background: none; border: 0; padding: 9px 6px; color: var(--muted);
+  .tabs button { flex: 1; background: none; border: 0; padding: 9px 3px; color: var(--muted); font-size: 12px;
     cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
   .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
   #panel { overflow: auto; padding: 12px 14px 40px; flex: 1; }
@@ -109,6 +110,25 @@
   .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; color: var(--muted); margin-top: 6px; }
   .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 
+  .legend-map { display: flex; gap: 10px; margin-left: auto; color: var(--muted); }
+  .legend-map i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .delta { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .chart { background: var(--panel2); border-radius: 8px; padding: 8px 10px 4px; margin-bottom: 8px; }
+  .chart .ct { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .chart .ct b { color: var(--text); font-weight: 600; }
+  .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart text { fill: #898781; font-size: 10px; }
+  .stack { display: flex; gap: 2px; height: 14px; margin: 4px 0 10px; }
+  .stack > i { display: block; height: 100%; min-width: 2px; }
+  .stack > i:first-child { border-radius: 4px 0 0 4px; } .stack > i:last-child { border-radius: 0 4px 4px 0; }
+  .lg { display: grid; grid-template-columns: 12px 1fr auto 44px; gap: 4px 8px; align-items: baseline;
+    font-size: 12px; padding: 4px 4px; border-radius: 4px; }
+  .lg i { width: 10px; height: 10px; border-radius: 2px; align-self: center; }
+  .lg .v { font-variant-numeric: tabular-nums; text-align: right; }
+  .lg .pc { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+  .lg .note { grid-column: 2 / -1; color: var(--muted); font-size: 11px; margin-top: -2px; }
+  .lg[data-go] { cursor: pointer; } .lg[data-go]:hover { background: var(--line); }
+
   @media (max-width: 900px) {
     body { overflow: auto; height: auto; grid-template-rows: auto auto auto; }
     main { grid-template-columns: 1fr; }
@@ -132,6 +152,7 @@
       <option value="folder">by folder</option>
       <option value="type">by file type</option>
       <option value="junk">junk only</option>
+      <option value="change">by change since last scan</option>
     </select>
   </label>
   <div class="search">
@@ -145,8 +166,10 @@
   <aside>
     <div class="tabs" id="tabs">
       <button data-t="junk" class="on">Junk</button>
+      <button data-t="changes">Changes</button>
+      <button data-t="disk">Disk</button>
       <button data-t="largest">Largest</button>
-      <button data-t="dupes">Duplicates</button>
+      <button data-t="dupes">Dupes</button>
       <button data-t="types">Types</button>
       <button data-t="info">Scan</button>
     </div>
@@ -187,6 +210,13 @@ function copy(text, btn) {
     ta.select(); document.execCommand('copy'); ta.remove(); done();
   }
 }
+const fmtD = g => (g > 0 ? '+' : g < 0 ? '−' : '±') + fmt(Math.abs(g));
+const ago = iso => {
+  const h = (Date.now() - new Date(iso)) / 36e5;
+  return h < 1 ? 'less than an hour ago' : h < 48 ? `${Math.round(h)} h ago` : `${Math.round(h / 24)} days ago`;
+};
+const when = iso => iso.replace('T', ' ').slice(0, 16);
+const base = D.history && D.history.baseline;
 const shq = p => `'${p.replace(/'/g, `'\\''`)}'`;
 
 // ---------------------------------------------------------------- hierarchy
@@ -213,11 +243,23 @@ const TYPE_COLORS = {
   code: '#3f9fd8', doc: '#4fb39a', data: '#5c7fc9', binary: '#7f8c9b', other: '#59606b',
 };
 const SAFETY_COLORS = { safe: '#2f9e4a', review: '#c58a14', info: '#5b6bc4' };
+const DIVERGE = { up: '#e66767', down: '#3987e5', mid: '#383835' };   // grew / shrank / unchanged
+const SERIES = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181'];
+if (!base) $('#mode option[value=change]').disabled = true;
 let mode = store.get('mode') || 'folder';
+if (mode === 'change' && !base) mode = 'folder';
 $('#mode').value = mode;
+let viewMaxAbs = 1;
 
 function colorOf(h, o, rd, branchHue) {
   if (o.data.o) return 'hsl(220 8% 26%)';
+  if (mode === 'change') {
+    const g = o.data.g || 0;
+    if (!g) return DIVERGE.mid;
+    let t = Math.sqrt(Math.abs(g) / viewMaxAbs);
+    if (h.children) t *= 0.55;
+    return d3.interpolateLab(DIVERGE.mid, g > 0 ? DIVERGE.up : DIVERGE.down)(Math.max(0.18, Math.min(1, t)));
+  }
   if (mode === 'type') {
     if (o.data.d) return `hsl(220 10% ${14 + rd * 5}%)`;
     return TYPE_COLORS[o.data.t] || TYPE_COLORS.other;
@@ -251,6 +293,8 @@ function render() {
     .paddingTop(n => n.depth === 0 ? 0 : LABEL_H)
     .tile(d3.treemapSquarify.ratio(1.2))(h);
 
+  viewMaxAbs = 1;
+  h.each(n => { if (n !== h && !n.children) viewMaxAbs = Math.max(viewMaxAbs, Math.abs(n.data.g || 0)); });
   const frag = document.createDocumentFragment();
   const hues = new Map();
   (h.children || []).forEach((c, i) => hues.set(c, (i * 137.508 + 200) % 360));
@@ -272,6 +316,7 @@ function render() {
     frag.appendChild(div);
   });
   el.replaceChildren(frag);
+  el.dataset.mode = mode;
   crumbs();
   const want = '#' + encodeURIComponent(focus.path);
   if (location.hash !== want) history.replaceState(null, '', want);
@@ -284,8 +329,20 @@ function crumbs() {
     return i === parts.length - 1 ? `<span class="here">${esc(label)}</span>`
       : `<a data-p="${esc(n.path)}">${esc(label)}</a><span class="sep">›</span>`;
   }).join('') +
-  `<span class="size">${fmt(focus.value)}${focus !== root ? ' · ' + pct(focus.value, root.value) + ' of scan' : ''}</span>` +
-  `<span class="tip">click to zoom · Esc to go up</span>`;
+  `<span class="size">${fmt(focus.value)}${focus !== root ? ' · ' + pct(focus.value, root.value) + ' of scan' : ''}</span>`;
+  mapLegend();
+}
+function mapLegend() {
+  const sw = (c, l) => `<span><i style="background:${c}"></i>${l}</span>`;
+  const legends = {
+    change: () => sw(DIVERGE.up, 'grew') + sw(DIVERGE.down, 'shrank') + sw(DIVERGE.mid, 'unchanged') +
+      `<span>since ${esc(when(base.scanned))}</span>`,
+    type: () => Object.entries(TYPE_COLORS).map(([k, c]) => sw(c, k)).join(''),
+    junk: () => Object.entries(SAFETY_COLORS).map(([k, c]) => sw(c, k)).join(''),
+  };
+  $('#crumbs').insertAdjacentHTML('beforeend', legends[mode]
+    ? `<span class="legend-map">${legends[mode]()}</span>`
+    : `<span class="tip">click to zoom · Esc to go up</span>`);
 }
 $('#crumbs').addEventListener('click', e => {
   const a = e.target.closest('a[data-p]'); if (a) zoom(byPath.get(a.dataset.p));
@@ -311,6 +368,7 @@ $('#map').addEventListener('mousemove', e => {
   tip.innerHTML = `<b>${esc(o.data.n)}</b> &nbsp;${fmt(o.value)}
     <div class="p">${esc(tilde(o.data.o ? o.parent.path + '/…' : o.path))}</div>
     <div>${pct(o.value, focus.value)} of this view · ${pct(o.value, root.value)} of scan</div>
+    ${base && !o.data.o ? `<div>${o.data.g ? (o.data.g === o.value ? 'new' : fmtD(o.data.g)) : 'unchanged'} since ${esc(when(base.scanned))}</div>` : ''}
     ${rule ? `<div style="margin-top:4px"><span class="badge ${rule.safety}">${rule.safety}</span> ${esc(rule.label)}</div>` : ''}`;
   tip.hidden = false;
   const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8);
@@ -402,6 +460,87 @@ const TABS = {
           ${g.count > 40 ? `<div class="more">+ ${(g.count - 40).toLocaleString()} more</div>` : ''}
         </div></details>`).join('')}`;
   },
+  changes() {
+    const H = D.history;
+    if (!H) return `<p class="desc">History is off for this scan (<code>--no-history</code>).</p>`;
+    const trend = H.trend || [];
+    const charts = trend.length >= 2
+      ? `<h3>Trend · ${trend.length} scans</h3>` + spark('free', 'Free disk space', trend, 'free') +
+        spark('total', `Size of ${tilde(D.root)}`, trend, 'total')
+      : '';
+    if (!base) return `<p class="desc">This is the first scan of <b>${esc(tilde(D.root))}</b>. Run diskmap again later
+      and this tab shows what grew, shrank, appeared or disappeared since then, and the map can be colored by change.</p>` + charts;
+    const deltaRows = list => list.slice(0, 60).map(([g, p, st]) =>
+      `<div class="row" data-go="${esc(p)}"><span class="path"><bdi>${esc(tilde(p))}</bdi></span>
+        ${st ? `<span class="badge ${st === 'new' ? 'review' : 'info'}">${st}</span>` : ''}
+        <span class="s delta">${fmtD(g)}</span></div>`).join('') || '<div class="more">Nothing over 10 MB.</div>';
+    return `<p class="desc">Compared with the scan from <b>${esc(when(base.scanned))}</b> (${ago(base.scanned)}).</p>
+      <div class="sum">
+        <div class="stat"><div class="v">${fmtD(base.totalDelta)}</div><div class="l">${esc(tilde(D.root))} · now ${fmt(root.value)}</div></div>
+        <div class="stat"><div class="v">${fmtD(base.freeDelta)}</div><div class="l">free space · now ${fmt(D.disk.free)}</div></div>
+      </div>
+      ${base.minSize !== D.stats.minSize ? `<p class="desc">The scans used different <code>--min-size</code> values, so small items may show as new or gone.</p>` : ''}
+      <h3>Grew or appeared</h3>${deltaRows(base.grew)}
+      <h3>Shrank or disappeared</h3>${deltaRows(base.shrank)}
+      <p class="desc" style="margin-top:12px">Each entry is the deepest folder or file that explains the change.
+        Compare with a different scan using <code>--compare oldest</code> or <code>--compare 2026-10-01</code>.</p>` + charts;
+  },
+  disk() {
+    const dk = D.disk, sy = D.system, vols = dk.volumes || [];
+    const sumRole = f => vols.filter(f).reduce((a, v) => a + v.used, 0);
+    const dataUsed = sumRole(v => v.role === 'Data') || dk.used;
+    const macos = sumRole(v => v.role !== 'Data' && v.role !== 'VM');
+    const swap = sumRole(v => v.role === 'VM');
+    const outside = sy ? sy.parts.reduce((a, p) => a + p.size, 0) : 0;
+    const segs = sy
+      ? [[`This scan (${tilde(D.root)})`, sy.scan], ['Elsewhere on the Data volume (sized below)', outside],
+         ['Everything else on the Data volume', Math.max(0, sy.rest)], ['macOS system volumes', macos], ['Swap', swap]]
+      : [['Data volume', dataUsed], ['macOS system volumes', macos], ['Swap', swap]];
+    const shown = segs.map((sg, i) => [...sg, SERIES[sy ? i : [0, 3, 4][i]]]).filter(sg => sg[1] > 0);
+    const bar = shown.map(([l, v, c]) => `<i style="flex:${v};background:${c}" data-tip="${esc(l)}: ${fmt(v)}"></i>`).join('') +
+      `<i style="flex:${dk.free};background:#2c2c2a" data-tip="Free: ${fmt(dk.free)}"></i>`;
+    const lg = (c, l, v, note = '', go = '') => `<div class="lg"${go ? ` data-go="${esc(go)}"` : ''}>
+      <i style="background:${c || 'transparent'}"></i><span>${esc(l)}</span><span class="v">${fmt(v)}</span>
+      <span class="pc">${pct(v, dk.total)}</span>${note ? `<span class="note">${note}</span>` : ''}</div>`;
+    const purge = dk.importantFree != null ? dk.importantFree - dk.free : 0;
+
+    let html = `<h3>Whole disk · ${fmt(dk.total)}</h3><div class="stack">${bar}</div>` +
+      shown.map(([l, v, c]) => lg(c, l, v)).join('') + lg('#2c2c2a', 'Free', dk.free);
+
+    html += `<h3>Data volume · ${fmt(dataUsed)}</h3>`;
+    if (sy) {
+      html += lg(SERIES[0], `This scan (${tilde(D.root)})`, sy.scan, '', D.root);
+      html += sy.parts.filter(p => p.size > 0).map(p => lg(SERIES[1], p.label, p.size,
+        p.denied ? `at least: ${p.denied.toLocaleString()} folders weren't readable` : '')).join('');
+      html += sy.rest >= 0
+        ? lg(SERIES[2], 'Everything else', sy.rest, `Folders this tool couldn't read (see the Scan tab), local snapshots,
+            ${D.root === D.home ? '' : 'the rest of /Users, '}APFS metadata and files deleted while still open.
+            macOS Settings → General → Storage lumps most of this, plus caches and logs, into “System Data”.`)
+        : `<p class="desc">The scan counted ${fmt(-sy.rest)} more than the volume reports. APFS clones (copies that share
+            blocks) are counted once per copy, so the scan can exceed the real usage.</p>`;
+      if (D.root !== '/') html += `<p class="desc">Scan <code>/</code> to put everything on the map: <code>./diskmap.py /</code></p>`;
+    } else {
+      html += `<p class="desc">Run without <code>--no-system</code> to size /Applications, /Library and /private/var.</p>`;
+    }
+
+    html += `<h3>macOS volumes · ${fmt(macos + swap)}</h3>` + vols.filter(v => v.role !== 'Data')
+      .sort((a, b) => b.used - a.used)
+      .map(v => lg(v.role === 'VM' ? SERIES[4] : SERIES[3], `${v.name}${v.name !== v.role ? ` (${v.role})` : ''}`, v.used,
+        esc(v.note) + (v.role === 'VM' && dk.swapUsed != null ? ` ${fmt(dk.swapUsed)} of swap in use now.` : ''))).join('');
+
+    html += `<h3>Free space</h3>` + lg('', 'Free now', dk.free) +
+      (purge > 0 ? lg('', 'Purgeable', purge, `macOS frees this automatically when space runs short (iCloud
+        downloads, caches, snapshots), so Finder reports ${fmt(dk.importantFree)} available.`) : '');
+
+    const snaps = dk.snapshots || [];
+    html += `<h3>Local snapshots · ${snaps.length}</h3>` + (snaps.length
+      ? `<p class="desc">Time Machine keeps these on the internal disk until it can back up. Their space counts as used
+          but isn't in any folder. macOS removes them when space runs low.</p>` +
+        snaps.map(n => `<div class="row"><span class="path"><bdi>${esc(n)}</bdi></span></div>`).join('') +
+        `<div class="cmd"><code>sudo tmutil deletelocalsnapshots /</code><button class="copy" data-copy="sudo tmutil deletelocalsnapshots /">copy</button></div>`
+      : `<p class="desc">None.</p>`);
+    return html;
+  },
   largest() {
     return `<h3>Largest files</h3>` + D.largest.slice(0, 150).map(([s, p]) => row(p, s)).join('') +
       `<h3>Largest folders (mapped)</h3>` + topFolders().map(n => row(n.path, n.value, '/')).join('');
@@ -431,10 +570,8 @@ const TABS = {
       <div class="stat"><div class="v">${fmt(root.value)}</div><div class="l">in ${esc(tilde(D.root))}</div></div>
       <div class="stat"><div class="v">${s.files.toLocaleString()}</div><div class="l">files · ${s.dirs.toLocaleString()} folders</div></div>
       <div class="stat"><div class="v">${s.seconds}s</div><div class="l">scan time · ${esc(D.scanned)}</div></div>
-      <div class="stat"><div class="v">${d.snapshots ?? '?'}</div><div class="l">local Time Machine snapshots</div></div></div>
+      <div class="stat"><div class="v">${(d.snapshots || []).length}</div><div class="l">local Time Machine snapshots</div></div></div>
       <p class="desc">Sizes are space actually allocated on disk (iCloud files that are only in the cloud count as 0). Hard links are counted once. Items under ${fmt(s.minSize)} are grouped as “smaller items”.</p>
-      ${d.snapshots ? `<div class="cmd"><code>tmutil listlocalsnapshots /</code><button class="copy" data-copy="tmutil listlocalsnapshots /">copy</button></div>
-        <p class="desc">Local snapshots can hold space that doesn't show up in any folder; macOS frees it when needed.</p>` : ''}
       <h3>Rescan</h3>
       <div class="cmd"><code>cd ${esc(shq(D.home + '/git/diskmap'))} && ./diskmap.py ${esc(shq(tilde(D.root)))}</code></div>
       <p class="desc">Then reload this page. Your current zoom is kept in the URL.</p>
@@ -443,6 +580,57 @@ const TABS = {
         D.denied.slice(0, 100).map(p => `<div class="row"><span class="path"><bdi>${esc(tilde(p))}</bdi></span></div>`).join('') : '<p class="desc">Everything was readable.</p>'}`;
   },
 };
+// small single-series line chart with hover crosshair
+const charts = {};
+function spark(id, title, pts, key) {
+  const W = 340, H = 92, T = 10, B = 16, L = 4, R = 52;
+  const data = pts.map(p => ({ t: new Date(p.scanned), v: p[key], p }));
+  const x = d3.scaleTime().domain(d3.extent(data, d => d.t)).range([L, W - R]);
+  let [lo, hi] = d3.extent(data, d => d.v);
+  if (hi - lo < 1e6) { lo -= 5e8; hi += 5e8; }
+  const y = d3.scaleLinear().domain([lo, hi]).nice(3).range([H - B, T]);
+  charts[id] = { data, x, y, W };
+  const line = d3.line().x(d => x(d.t)).y(d => y(d.v))(data);
+  const last = data[data.length - 1];
+  const [y0, y1] = y.domain();
+  return `<div class="chart"><div class="ct"><span>${esc(title)}</span><b>${fmt(last.v)}</b></div>
+    <svg viewBox="0 0 ${W} ${H}" data-chart="${id}">
+      <line x1="0" x2="${W - R + 6}" y1="${y(y1)}" y2="${y(y1)}" stroke="#2c2c2a"/>
+      <line x1="0" x2="${W - R + 6}" y1="${y(y0)}" y2="${y(y0)}" stroke="#383835"/>
+      <text x="${W}" y="${y(y1) + 3}" text-anchor="end">${fmt(y1)}</text>
+      <text x="${W}" y="${y(y0) + 3}" text-anchor="end">${fmt(y0)}</text>
+      <path d="${line}" fill="none" stroke="${SERIES[0]}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      <circle cx="${x(last.t)}" cy="${y(last.v)}" r="4" fill="${SERIES[0]}" stroke="var(--panel2)" stroke-width="2"/>
+      <line class="xh" y1="${T}" y2="${H - B}" stroke="#898781" visibility="hidden"/>
+      <circle class="xd" r="4" fill="${SERIES[0]}" stroke="var(--panel2)" stroke-width="2" visibility="hidden"/>
+      <text x="0" y="${H - 2}">${esc(when(data[0].p.scanned).slice(0, 10))}</text>
+      <text x="${W - R}" y="${H - 2}" text-anchor="end">${esc(when(last.p.scanned).slice(0, 10))}</text>
+      <rect width="${W}" height="${H}" fill="transparent"/>
+    </svg></div>`;
+}
+document.addEventListener('mousemove', e => {
+  const svg = e.target.closest('svg[data-chart]');
+  document.querySelectorAll('svg[data-chart] .xh, svg[data-chart] .xd').forEach(el => {
+    if (!svg || !svg.contains(el)) el.setAttribute('visibility', 'hidden');
+  });
+  const tipEl = e.target.closest('[data-tip]');
+  if (!svg && !tipEl) { if (!e.target.closest('#map')) tip.hidden = true; return; }
+  if (svg) {
+    const c = charts[svg.dataset.chart], r = svg.getBoundingClientRect();
+    const t = c.x.invert((e.clientX - r.left) * c.W / r.width);
+    const d = c.data[d3.minIndex(c.data, d => Math.abs(d.t - t))];
+    const xh = svg.querySelector('.xh'), xd = svg.querySelector('.xd');
+    xh.setAttribute('x1', c.x(d.t)); xh.setAttribute('x2', c.x(d.t)); xh.setAttribute('visibility', 'visible');
+    xd.setAttribute('cx', c.x(d.t)); xd.setAttribute('cy', c.y(d.v)); xd.setAttribute('visibility', 'visible');
+    tip.innerHTML = `<b>${fmt(d.v)}</b><div class="p">${esc(when(d.p.scanned))}</div>`;
+  } else {
+    tip.textContent = tipEl.dataset.tip;
+  }
+  tip.hidden = false;
+  tip.style.left = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8) + 'px';
+  tip.style.top = (e.clientY + 18) + 'px';
+});
+
 function topFolders() {
   // biggest folders that are not just a wrapper around a bigger child
   const out = [];
@@ -464,7 +652,8 @@ function showTab(t) {
 $('#meta').textContent = `${tilde(D.root)} · scanned ${D.scanned}`;
 const d = D.disk;
 $('#disk').innerHTML = `<span class="bar"><i style="width:${100 * d.used / d.total}%"></i></span>
-  ${fmt(d.used)} used of ${fmt(d.total)} · <b style="color:var(--text)">${fmt(d.free)} free</b>`;
+  ${fmt(d.used)} used of ${fmt(d.total)} · <b style="color:var(--text)">${fmt(d.free)} free</b>${
+    d.importantFree > d.free ? ` · ${fmt(d.importantFree)} available incl. purgeable` : ''}`;
 
 const start = decodeURIComponent(location.hash.slice(1));
 focus = start ? nodeFor(start) : root;

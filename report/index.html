@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disk Map</title>
+<style>
+  :root {
+    --bg: #111317; --panel: #181b21; --panel2: #1f232b; --line: #2a2f39;
+    --text: #e6e8eb; --muted: #8b93a1; --accent: #6ea8fe;
+    --safe: #3fb950; --review: #d29922; --info: #6e7fd6; --hit: #ffd33d;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+  body { display: grid; grid-template-rows: auto auto 1fr; height: 100vh; overflow: hidden; }
+  button, select, input { font: inherit; color: inherit; }
+  code { font: 12px ui-monospace, "SF Mono", Menlo, monospace; }
+
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .disk { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .bar { width: 160px; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .spacer { flex: 1; }
+  .search { position: relative; }
+  .search input { width: 240px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--line);
+    background: var(--bg); outline: none; }
+  .search input:focus { border-color: var(--accent); }
+  #results { position: absolute; z-index: 20; top: 32px; right: 0; width: 460px; max-height: 60vh;
+    overflow: auto; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 10px 30px #0008; }
+  select { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+
+  #crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 6px 16px;
+    border-bottom: 1px solid var(--line); font-size: 12px; min-height: 31px; }
+  #crumbs a { color: var(--accent); cursor: pointer; padding: 1px 4px; border-radius: 4px; }
+  #crumbs a:hover { background: var(--panel2); }
+  #crumbs .sep { color: var(--muted); }
+  #crumbs .here { font-weight: 600; padding: 1px 4px; }
+  #crumbs .size { color: var(--muted); margin-left: 8px; }
+  #crumbs .tip { margin-left: auto; color: var(--muted); }
+
+  main { display: grid; grid-template-columns: 1fr 380px; min-height: 0; }
+  #map { position: relative; overflow: hidden; margin: 8px; }
+  .cell { position: absolute; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    padding: 1px 4px; font-size: 11px; line-height: 15px; color: #fff; cursor: pointer;
+    border-radius: 2px; }
+  .cell.dark { color: #111; }
+  .cell span { opacity: .75; margin-left: 4px; }
+  .cell.leaf span { display: block; margin-left: 0; }
+  .cell.junktop { outline: 1.5px dashed #ff7b72; outline-offset: -2px; }
+  .cell.other { background-image: repeating-linear-gradient(45deg, #ffffff10 0 4px, transparent 4px 8px); }
+  .cell.hit { outline: 2px solid var(--hit); outline-offset: -2px; z-index: 2; }
+  .cell.sel { outline: 2px solid #fff; outline-offset: -2px; z-index: 3; }
+  .cell:hover { filter: brightness(1.15); }
+  #tip { position: fixed; z-index: 30; pointer-events: none; max-width: 460px; padding: 8px 10px;
+    background: #0b0d10ee; border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+  #tip .p { color: var(--muted); word-break: break-all; }
+  #tip b { font-size: 13px; }
+
+  aside { border-left: 1px solid var(--line); background: var(--panel); display: flex;
+    flex-direction: column; min-height: 0; }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tabs button { flex: 1; background: none; border: 0; padding: 9px 6px; color: var(--muted);
+    cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+  #panel { overflow: auto; padding: 12px 14px 40px; flex: 1; }
+  .sum { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+  .stat { background: var(--panel2); border-radius: 8px; padding: 8px 10px; }
+  .stat .v { font-size: 18px; font-weight: 650; }
+  .stat .l { color: var(--muted); font-size: 11px; }
+  details { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; background: var(--panel2); }
+  summary { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary .name { flex: 1; font-weight: 550; }
+  summary .sz { font-variant-numeric: tabular-nums; }
+  .badge { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; padding: 1px 6px;
+    border-radius: 10px; border: 1px solid; }
+  .badge.safe { color: var(--safe); } .badge.review { color: var(--review); } .badge.info { color: var(--info); }
+  .body { padding: 0 10px 10px; }
+  .desc { color: var(--muted); margin: 0 0 8px; }
+  .cmd { display: flex; gap: 6px; align-items: center; background: var(--bg); border-radius: 6px;
+    padding: 5px 8px; margin-bottom: 8px; }
+  .cmd code { flex: 1; overflow-x: auto; white-space: nowrap; }
+  .copy { background: none; border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px;
+    cursor: pointer; color: var(--muted); font-size: 11px; }
+  .copy:hover { color: var(--text); }
+  .row { display: flex; gap: 8px; padding: 3px 4px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .row:hover { background: var(--line); }
+  .row .path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl;
+    text-align: left; }
+  .row .s { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .more { color: var(--muted); font-size: 11px; padding: 4px; }
+  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted);
+    margin: 16px 0 8px; }
+  h3:first-child { margin-top: 0; }
+  .tbar { display: grid; grid-template-columns: 64px 1fr 70px; gap: 8px; align-items: center;
+    margin-bottom: 5px; font-size: 12px; }
+  .tbar .track { height: 10px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .tbar .track i { display: block; height: 100%; }
+  .sel-box { background: var(--panel2); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
+  .sel-box .p { word-break: break-all; color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
+  .empty { display: grid; place-items: center; height: 100vh; text-align: center; color: var(--muted); }
+  .empty code { color: var(--text); background: var(--panel2); padding: 2px 6px; border-radius: 4px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+
+  @media (max-width: 900px) {
+    body { overflow: auto; height: auto; grid-template-rows: auto auto auto; }
+    main { grid-template-columns: 1fr; }
+    #map { height: 70vh; }
+    aside { border-left: 0; border-top: 1px solid var(--line); max-height: none; }
+    .search input { width: 100%; } .search { flex: 1 1 100%; }
+    #results { width: 100%; }
+  }
+</style>
+<script src="d3.min.js"></script>
+<script src="data.js"></script>
+</head>
+<body>
+<header>
+  <h1>Disk Map</h1>
+  <span class="meta" id="meta"></span>
+  <span class="disk" id="disk"></span>
+  <span class="spacer"></span>
+  <label class="meta">Color
+    <select id="mode">
+      <option value="folder">by folder</option>
+      <option value="type">by file type</option>
+      <option value="junk">junk only</option>
+    </select>
+  </label>
+  <div class="search">
+    <input id="q" type="search" placeholder="Find files & folders…  ( / )" autocomplete="off">
+    <div id="results" hidden></div>
+  </div>
+</header>
+<nav id="crumbs"></nav>
+<main>
+  <div id="map"></div>
+  <aside>
+    <div class="tabs" id="tabs">
+      <button data-t="junk" class="on">Junk</button>
+      <button data-t="largest">Largest</button>
+      <button data-t="dupes">Duplicates</button>
+      <button data-t="types">Types</button>
+      <button data-t="info">Scan</button>
+    </div>
+    <div id="panel"></div>
+  </aside>
+</main>
+<div id="tip" hidden></div>
+
+<script>
+(() => {
+const D = window.DISKMAP;
+if (!D) {
+  document.body.innerHTML = `<div class="empty"><div><h1>No scan yet</h1>
+    <p>Run <code>./diskmap.py</code> in the diskmap folder, then reload this page.</p></div></div>`;
+  return;
+}
+
+// ---------------------------------------------------------------- helpers
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = b => {
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+  while (b >= 1000 && i < 4) { b /= 1000; i++; }
+  return i ? `${b.toFixed(b < 10 ? 2 : b < 100 ? 1 : 0)} ${u[i]}` : `${b} B`;
+};
+const pct = (a, b) => b ? `${(100 * a / b).toFixed(a / b < 0.01 ? 2 : 1)}%` : '';
+const tilde = p => p.startsWith(D.home + '/') || p === D.home ? '~' + p.slice(D.home.length) : p;
+const store = {
+  get: k => { try { return localStorage.getItem('diskmap.' + k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem('diskmap.' + k, v); } catch {} },
+};
+function copy(text, btn) {
+  const done = () => { if (btn) { const t = btn.textContent; btn.textContent = 'copied'; setTimeout(() => btn.textContent = t, 1000); } };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, () => fallback());
+  else fallback();
+  function fallback() {
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy'); ta.remove(); done();
+  }
+}
+const shq = p => `'${p.replace(/'/g, `'\\''`)}'`;
+
+// ---------------------------------------------------------------- hierarchy
+const root = d3.hierarchy(D.tree, d => d.c).sum(d => d.c ? 0 : d.s).sort((a, b) => b.value - a.value);
+const byPath = new Map();
+root.each(n => {
+  n.data.__n = n;
+  n.junk = n.data.j || (n.parent ? n.parent.junk : null);
+  n.path = !n.parent ? n.data.n : (n.parent.path === '/' ? '/' : n.parent.path + '/') + n.data.n;
+  if (!n.data.o) byPath.set(n.path, n);
+});
+function nodeFor(p) {
+  while (p && p.length >= root.path.length) {
+    if (byPath.has(p)) return byPath.get(p);
+    p = p.slice(0, p.lastIndexOf('/')) || '/';
+    if (p === '/' && !byPath.has('/')) break;
+  }
+  return root;
+}
+
+// ---------------------------------------------------------------- colors
+const TYPE_COLORS = {
+  video: '#e05d8a', image: '#d98b3a', audio: '#b7a234', archive: '#8a63d2', disk: '#c94f4f',
+  code: '#3f9fd8', doc: '#4fb39a', data: '#5c7fc9', binary: '#7f8c9b', other: '#59606b',
+};
+const SAFETY_COLORS = { safe: '#2f9e4a', review: '#c58a14', info: '#5b6bc4' };
+let mode = store.get('mode') || 'folder';
+$('#mode').value = mode;
+
+function colorOf(h, o, rd, branchHue) {
+  if (o.data.o) return 'hsl(220 8% 26%)';
+  if (mode === 'type') {
+    if (o.data.d) return `hsl(220 10% ${14 + rd * 5}%)`;
+    return TYPE_COLORS[o.data.t] || TYPE_COLORS.other;
+  }
+  if (mode === 'junk') {
+    if (o.junk) {
+      const c = d3.hsl(SAFETY_COLORS[D.rules[o.junk].safety]);
+      c.l = Math.min(0.6, c.l + (rd - 1) * 0.06); return c.formatHsl();
+    }
+    return `hsl(220 8% ${14 + rd * 5}%)`;
+  }
+  return `hsl(${branchHue} ${o.data.d ? 45 : 55}% ${Math.min(62, 26 + rd * 9)}%)`;
+}
+
+// ---------------------------------------------------------------- treemap
+const MAXD = 3;            // levels drawn below the focused folder
+const LABEL_H = 16;
+let focus = root, selected = null, hits = new Set();
+
+function render() {
+  const el = $('#map');
+  const W = el.clientWidth, H = el.clientHeight;
+  const fd = focus.depth;
+  const within = d => d.__n.depth - fd < MAXD;
+  const h = d3.hierarchy(focus.data, d => within(d) ? d.c : null)
+    .sum(d => (d.c && within(d)) ? 0 : d.s)
+    .sort((a, b) => b.value - a.value);
+  d3.treemap().size([W, H]).round(true)
+    .paddingInner(1)
+    .paddingOuter(n => n.depth === 0 ? 0 : 2)
+    .paddingTop(n => n.depth === 0 ? 0 : LABEL_H)
+    .tile(d3.treemapSquarify.ratio(1.2))(h);
+
+  const frag = document.createDocumentFragment();
+  const hues = new Map();
+  (h.children || []).forEach((c, i) => hues.set(c, (i * 137.508 + 200) % 360));
+  h.each(n => {
+    if (n === h) return;
+    const w = n.x1 - n.x0, ht = n.y1 - n.y0;
+    if (w < 3 || ht < 3) return;
+    const o = n.data.__n, rd = n.depth;
+    let b = n; while (b.depth > 1) b = b.parent;
+    const bg = colorOf(n, o, rd, hues.get(b));
+    const div = document.createElement('div');
+    const isContainer = !!n.children;
+    div.className = 'cell' + (isContainer ? '' : ' leaf') + (o.data.j ? ' junktop' : '') +
+      (o.data.o ? ' other' : '') + (o === selected ? ' sel' : '') + (hits.has(o) ? ' hit' : '') +
+      (d3.hsl(bg).l > 0.58 ? ' dark' : '');
+    div.style.cssText = `left:${n.x0}px;top:${n.y0}px;width:${w}px;height:${ht}px;background:${bg}`;
+    if (w > 28 && ht > 13) div.innerHTML = `${esc(o.data.n)}${o.data.d && !isContainer ? '/' : ''}<span>${fmt(o.value)}</span>`;
+    div._n = o;
+    frag.appendChild(div);
+  });
+  el.replaceChildren(frag);
+  crumbs();
+  const want = '#' + encodeURIComponent(focus.path);
+  if (location.hash !== want) history.replaceState(null, '', want);
+}
+
+function crumbs() {
+  const parts = focus.ancestors().reverse();
+  $('#crumbs').innerHTML = parts.map((n, i) => {
+    const label = i === 0 ? tilde(n.path) : n.data.n;
+    return i === parts.length - 1 ? `<span class="here">${esc(label)}</span>`
+      : `<a data-p="${esc(n.path)}">${esc(label)}</a><span class="sep">›</span>`;
+  }).join('') +
+  `<span class="size">${fmt(focus.value)}${focus !== root ? ' · ' + pct(focus.value, root.value) + ' of scan' : ''}</span>` +
+  `<span class="tip">click to zoom · Esc to go up</span>`;
+}
+$('#crumbs').addEventListener('click', e => {
+  const a = e.target.closest('a[data-p]'); if (a) zoom(byPath.get(a.dataset.p));
+});
+
+function zoom(n) { if (!n) return; focus = n; render(); }
+function go(path) {
+  const n = nodeFor(path);
+  select(n);
+  zoom(n.children ? n : (n.parent || root));
+}
+function select(n) {
+  selected = n;
+  showTab(tab);
+}
+
+// tooltip + clicks
+const tip = $('#tip');
+$('#map').addEventListener('mousemove', e => {
+  const c = e.target.closest('.cell'); if (!c) { tip.hidden = true; return; }
+  const o = c._n;
+  const rule = o.junk && D.rules[o.junk];
+  tip.innerHTML = `<b>${esc(o.data.n)}</b> &nbsp;${fmt(o.value)}
+    <div class="p">${esc(tilde(o.data.o ? o.parent.path + '/…' : o.path))}</div>
+    <div>${pct(o.value, focus.value)} of this view · ${pct(o.value, root.value)} of scan</div>
+    ${rule ? `<div style="margin-top:4px"><span class="badge ${rule.safety}">${rule.safety}</span> ${esc(rule.label)}</div>` : ''}`;
+  tip.hidden = false;
+  const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8);
+  const y = e.clientY + 18 + tip.offsetHeight > innerHeight ? e.clientY - tip.offsetHeight - 10 : e.clientY + 18;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+});
+$('#map').addEventListener('mouseleave', () => tip.hidden = true);
+$('#map').addEventListener('click', e => {
+  const c = e.target.closest('.cell'); if (!c) return;
+  const o = c._n;
+  if (o.children && o !== focus) { select(o); zoom(o); }
+  else { select(o.data.o ? o.parent : o); render(); }
+});
+document.addEventListener('keydown', e => {
+  if (e.target.matches('input, select, textarea')) {
+    if (e.key === 'Escape') { e.target.blur(); $('#results').hidden = true; }
+    return;
+  }
+  if ((e.key === 'Escape' || e.key === 'Backspace') && focus.parent) { zoom(focus.parent); e.preventDefault(); }
+  if (e.key === '/') { $('#q').focus(); e.preventDefault(); }
+});
+$('#mode').addEventListener('change', e => { mode = e.target.value; store.set('mode', mode); render(); showTab(tab); });
+let rt; new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(render, 60); }).observe($('#map'));
+
+// ---------------------------------------------------------------- search
+let st;
+$('#q').addEventListener('input', e => {
+  clearTimeout(st);
+  st = setTimeout(() => {
+    const q = e.target.value.trim().toLowerCase();
+    const box = $('#results');
+    hits = new Set();
+    if (q.length < 2) { box.hidden = true; render(); return; }
+    const found = [];
+    root.each(n => { if (!n.data.o && n !== root && n.data.n.toLowerCase().includes(q)) found.push(n); });
+    found.sort((a, b) => b.value - a.value);
+    found.forEach(n => hits.add(n));
+    box.innerHTML = found.length
+      ? found.slice(0, 60).map(n => row(n.path, n.value, n.data.d ? '/' : '')).join('') +
+        (found.length > 60 ? `<div class="more">+ ${found.length - 60} more (highlighted on the map)</div>` : '')
+      : `<div class="more">No matches among mapped items (items under ${fmt(D.stats.minSize)} are grouped).</div>`;
+    box.hidden = false;
+    render();
+  }, 150);
+});
+$('#q').addEventListener('focus', () => { if ($('#q').value.trim().length > 1) $('#results').hidden = false; });
+document.addEventListener('click', e => { if (!e.target.closest('.search')) $('#results').hidden = true; });
+
+function row(path, size, suffix = '') {
+  return `<div class="row" data-go="${esc(path)}"><span class="path"><bdi>${esc(tilde(path))}${suffix}</bdi></span><span class="s">${fmt(size)}</span></div>`;
+}
+document.addEventListener('click', e => {
+  const r = e.target.closest('[data-go]'); if (r) { go(r.dataset.go); $('#results').hidden = true; }
+  const c = e.target.closest('[data-copy]'); if (c) copy(c.dataset.copy, c);
+});
+
+// ---------------------------------------------------------------- sidebar
+let tab = store.get('tab') || 'junk';
+$('#tabs').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (b) { tab = b.dataset.t; store.set('tab', tab); showTab(tab); }
+});
+
+function selBox() {
+  if (!selected || selected === root) return '';
+  const n = selected, rule = n.junk && D.rules[n.junk];
+  return `<div class="sel-box"><b>${esc(n.data.n)}${n.data.d ? '/' : ''}</b> &nbsp;${fmt(n.value)}
+    <div class="p">${esc(n.path)}</div>
+    ${rule ? `<p class="desc"><span class="badge ${rule.safety}">${rule.safety}</span> ${esc(rule.label)}: ${esc(rule.desc)}</p>` : ''}
+    <div class="cmd"><code>open -R ${esc(shq(n.path))}</code><button class="copy" data-copy="${esc('open -R ' + shq(n.path))}">copy</button></div>
+    <button class="copy" data-copy="${esc(n.path)}">copy path</button></div>`;
+}
+
+const TABS = {
+  junk() {
+    const groups = Object.entries(D.findings).map(([id, f]) => ({ id, ...f, r: D.rules[id] }))
+      .sort((a, b) => b.total - a.total);
+    const tot = s => groups.filter(g => g.r.safety === s).reduce((a, g) => a + g.total, 0);
+    return `<div class="sum">
+        <div class="stat"><div class="v" style="color:var(--safe)">${fmt(tot('safe'))}</div><div class="l">safe to clear</div></div>
+        <div class="stat"><div class="v" style="color:var(--review)">${fmt(tot('review'))}</div><div class="l">worth reviewing</div></div>
+      </div>
+      <p class="desc">Nothing is deleted by this tool. Copy a command, or click a path to see it on the map. Junk folders are outlined in red on the map.</p>
+      ${groups.map(g => `<details>
+        <summary><span class="badge ${g.r.safety}">${g.r.safety}</span><span class="name">${esc(g.r.label)}</span>
+          <span class="sz">${fmt(g.total)}</span></summary>
+        <div class="body"><p class="desc">${esc(g.r.desc)} ${g.count > 1 ? `${g.count.toLocaleString()} items.` : ''}</p>
+          <div class="cmd"><code>${esc(g.r.hint)}</code><button class="copy" data-copy="${esc(g.r.hint)}">copy</button></div>
+          ${g.items.slice(0, 40).map(([s, p]) => row(p, s)).join('')}
+          ${g.count > 40 ? `<div class="more">+ ${(g.count - 40).toLocaleString()} more</div>` : ''}
+        </div></details>`).join('')}`;
+  },
+  largest() {
+    return `<h3>Largest files</h3>` + D.largest.slice(0, 150).map(([s, p]) => row(p, s)).join('') +
+      `<h3>Largest folders (mapped)</h3>` + topFolders().map(n => row(n.path, n.value, '/')).join('');
+  },
+  dupes() {
+    if (!D.dupes.length) return `<p class="desc">No duplicate files found (files ≥ 20 MB are checked; run without <code>--no-dupes</code>).</p>`;
+    const wasted = D.dupes.reduce((a, g) => a + g.size * (g.paths.length - 1), 0);
+    return `<div class="sum"><div class="stat"><div class="v">${fmt(wasted)}</div><div class="l">in extra copies</div></div>
+      <div class="stat"><div class="v">${D.dupes.length}</div><div class="l">duplicate groups</div></div></div>
+      <p class="desc">Identical content, verified by hash. On APFS some copies may be clones that share blocks and use no extra space; Finder's “Get Info” can't tell either.</p>` +
+      D.dupes.map(g => `<details><summary><span class="name">${g.paths.length} × ${fmt(g.size)}</span>
+        ${g.sampled ? '<span class="badge info" title="very large: compared by sampled chunks">sampled</span>' : ''}
+        <span class="sz">${fmt(g.size * (g.paths.length - 1))} extra</span></summary>
+        <div class="body">${g.paths.map(p => row(p, g.size)).join('')}</div></details>`).join('');
+  },
+  types() {
+    const t = Object.entries(D.types).sort((a, b) => b[1][0] - a[1][0]);
+    const max = t.length ? t[0][1][0] : 1;
+    return `<h3>Space by file type</h3>` + t.map(([k, [b, c]]) => `<div class="tbar" title="${c.toLocaleString()} files">
+      <span>${k}</span><span class="track"><i style="width:${100 * b / max}%;background:${TYPE_COLORS[k]}"></i></span>
+      <span class="s" style="text-align:right">${fmt(b)}</span></div>`).join('') +
+      `<p class="desc" style="margin-top:12px">Switch “Color” to “by file type” to see these on the map.</p>`;
+  },
+  info() {
+    const s = D.stats, d = D.disk;
+    return `<h3>This scan</h3><div class="sum">
+      <div class="stat"><div class="v">${fmt(root.value)}</div><div class="l">in ${esc(tilde(D.root))}</div></div>
+      <div class="stat"><div class="v">${s.files.toLocaleString()}</div><div class="l">files · ${s.dirs.toLocaleString()} folders</div></div>
+      <div class="stat"><div class="v">${s.seconds}s</div><div class="l">scan time · ${esc(D.scanned)}</div></div>
+      <div class="stat"><div class="v">${d.snapshots ?? '?'}</div><div class="l">local Time Machine snapshots</div></div></div>
+      <p class="desc">Sizes are space actually allocated on disk (iCloud files that are only in the cloud count as 0). Hard links are counted once. Items under ${fmt(s.minSize)} are grouped as “smaller items”.</p>
+      ${d.snapshots ? `<div class="cmd"><code>tmutil listlocalsnapshots /</code><button class="copy" data-copy="tmutil listlocalsnapshots /">copy</button></div>
+        <p class="desc">Local snapshots can hold space that doesn't show up in any folder; macOS frees it when needed.</p>` : ''}
+      <h3>Rescan</h3>
+      <div class="cmd"><code>cd ${esc(shq(D.home + '/git/diskmap'))} && ./diskmap.py ${esc(shq(tilde(D.root)))}</code></div>
+      <p class="desc">Then reload this page. Your current zoom is kept in the URL.</p>
+      <h3>Not readable (${D.deniedCount.toLocaleString()})</h3>
+      ${D.deniedCount ? `<p class="desc">Grant your terminal Full Disk Access (System Settings → Privacy & Security) to include these.</p>` +
+        D.denied.slice(0, 100).map(p => `<div class="row"><span class="path"><bdi>${esc(tilde(p))}</bdi></span></div>`).join('') : '<p class="desc">Everything was readable.</p>'}`;
+  },
+};
+function topFolders() {
+  // biggest folders that are not just a wrapper around a bigger child
+  const out = [];
+  root.each(n => { if (n.data.d && n !== root && n.depth >= 1) out.push(n); });
+  return out.filter(n => !(n.children && n.children[0].data.d && n.children[0].value > n.value * 0.9))
+    .sort((a, b) => b.value - a.value).slice(0, 40);
+}
+function showTab(t) {
+  if (!TABS[t]) t = 'junk';
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  const open = [...document.querySelectorAll('#panel details[open] .name')].map(e => e.textContent);
+  $('#panel').innerHTML = selBox() + TABS[t]();
+  document.querySelectorAll('#panel details').forEach(d => {
+    if (open.includes(d.querySelector('.name').textContent)) d.open = true;
+  });
+}
+
+// ---------------------------------------------------------------- header
+$('#meta').textContent = `${tilde(D.root)} · scanned ${D.scanned}`;
+const d = D.disk;
+$('#disk').innerHTML = `<span class="bar"><i style="width:${100 * d.used / d.total}%"></i></span>
+  ${fmt(d.used)} used of ${fmt(d.total)} · <b style="color:var(--text)">${fmt(d.free)} free</b>`;
+
+const start = decodeURIComponent(location.hash.slice(1));
+focus = start ? nodeFor(start) : root;
+render();
+showTab(tab);
+})();
+</script>
+</body>
+</html>

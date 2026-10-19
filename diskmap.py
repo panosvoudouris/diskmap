@@ -640,17 +640,19 @@ class Scanner:
                 self.results[fut] = (r["size"], r["node"])
                 done += 1
                 now = time.time()
-                if now - self._last_print > 0.25 or done == len(self.futures):
+                if not self.quiet and (now - self._last_print > 0.25 or done == len(self.futures)):
                     self._last_print = now
                     sys.stderr.write(f"\r\033[K  {self.files:>10,} files  {human(self.bytes):>10}  "
                                      f"{done:,}/{len(self.futures):,} folders")
             total, tree = self.resolve(self.top)
+            # a file hard-linked into folders that different workers scanned was counted by
+            # each of them; keep it under the alphabetically first path so reports are stable
             seen = set()
-            for links in [self.links] + self.worker_links:
-                for key, size, path, dev in links:
-                    if key in seen:
-                        self.uncount(tree, path, size, dev)
-                    seen.add(key)
+            for key, size, path, dev in sorted(l for links in [self.links] + self.worker_links
+                                               for l in links):
+                if key in seen:
+                    self.uncount(tree, path, size, dev)
+                seen.add(key)
             total = tree["s"] if tree else 0
         else:
             total, tree = self.top
@@ -738,49 +740,53 @@ def _files_under(path):
 
 
 def verify_dupe_dirs(size, paths):
-    """Folders whose names and sizes match: confirm by comparing the biggest files' contents,
-    and estimate how much space the extra copies really take (APFS clones share blocks)."""
+    """Folders whose names and sizes match: split them by the contents of their biggest files,
+    and estimate how much space the extra copies really take (APFS clones share blocks).
+    Returns a group for every set of two or more folders that really are identical."""
     try:
         listings = [_files_under(p) for p in paths]
     except OSError:
-        return None
+        return []
     first = listings[0]
     if not first or any(lst != first for lst in listings[1:]):
-        return None
+        return []
     biggest = sorted(first, key=first.get, reverse=True)[:50]
-    for rel in biggest[:8]:
-        if len({_hash(os.path.join(p, rel), first[rel], True) for p in paths}) != 1:
-            return None
-    copies = len(paths) - 1
-    sampled = sum(first[r] for r in biggest) * copies
-    extra = sum(real_extra([os.path.join(p, r) for p in paths], first[r])[0] for r in biggest)
-    ratio = min(1, extra / sampled) if sampled else 1
-    return {"size": size, "paths": paths, "files": len(first),
-            "wasted": int(size * copies * ratio), "clones": extra < sampled}
+    same = defaultdict(list)
+    for p in paths:
+        same[tuple(_hash(os.path.join(p, rel), first[rel], True) for rel in biggest[:8])].append(p)
+    groups = []
+    for members in same.values():
+        if len(members) < 2:
+            continue
+        copies = len(members) - 1
+        sampled = sum(first[r] for r in biggest) * copies
+        extra = sum(real_extra([os.path.join(p, r) for p in members], first[r])[0] for r in biggest)
+        ratio = min(1, extra / sampled) if sampled else 1
+        groups.append({"size": size, "paths": members, "files": len(first),
+                       "wasted": int(size * copies * ratio), "clones": extra < sampled})
+    return groups
 
 
 def find_dupe_dirs(dir_sigs, pool):
     """Whole folders that exist more than once. Only the outermost copy is listed: two copies
     of a project aren't also reported as duplicate src/, docs/ …"""
     candidates = sorted(((min(s for s, _ in items), sorted(p for _, p in items))
-                         for items in dir_sigs.values() if len(items) > 1), reverse=True)
-    chosen, covered = [], []
-    for size, paths in candidates:
-        if all(any(p.startswith(c + "/") for c in covered) for p in paths):
-            continue
-        chosen.append((size, paths))
-        covered.extend(paths)
-        if len(chosen) >= 100:
-            break
-    futures = [pool.submit(_dir_dupe_task, size, paths) for size, paths in chosen]
-    groups = []
+                         for items in dir_sigs.values() if len(items) > 1), reverse=True)[:300]
+    futures = [pool.submit(_dir_dupe_task, size, paths) for size, paths in candidates]
+    verified = []
     for i, fut in enumerate(as_completed(futures)):
         sys.stderr.write(f"\r\033[K  checking duplicate folders {i + 1}/{len(futures)}")
-        if fut.result():
-            groups.append(fut.result())
+        verified.extend(fut.result())
     sys.stderr.write("\r\033[K")
+    verified.sort(key=lambda g: -g["size"])
+    groups, covered = [], []
+    for g in verified:
+        if all(any(p.startswith(c + "/") for c in covered) for p in g["paths"]):
+            continue
+        groups.append(g)
+        covered.extend(g["paths"])
     groups.sort(key=lambda g: (-g["wasted"], -g["size"]))
-    return groups
+    return groups[:100]
 
 
 # ------------------------------------------------------------- untouched folders
@@ -1202,6 +1208,11 @@ def main():
         "tree": tree,
     }
     os.makedirs(args.out, exist_ok=True)
+    page_dir = os.path.join(HERE, "report")
+    if os.path.realpath(args.out) != os.path.realpath(page_dir):  # --out elsewhere: bring the page along
+        for name in ("index.html", "d3.min.js"):
+            shutil.copy2(os.path.join(page_dir, name), args.out)
+        shutil.copytree(os.path.join(page_dir, "fonts"), os.path.join(args.out, "fonts"), dirs_exist_ok=True)
     out = os.path.join(args.out, "data.js")
     with open(out + ".tmp", "w", encoding="utf-8") as f:
         f.write("window.DISKMAP = ")

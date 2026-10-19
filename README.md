@@ -38,6 +38,15 @@ No dependencies beyond the system `python3`. d3 and the Antonio font (SIL Open F
 | `--no-system` | skip sizing `/Applications`, `/Library` etc. for the Disk tab |
 | `--jobs N` | worker processes (default: your Mac's performance-core count; `1` = single process) |
 
+## Tests
+
+```sh
+python3 -m unittest discover tests   # scanner, rules, duplicates, history, CLI (~2 s)
+node --test tests/report.test.mjs    # report page in headless Chrome (~3 s)
+```
+
+The Python tests build small folder trees in a temp directory, so the macOS-specific parts (bulk directory listing, APFS clones, Date Added) run for real. The browser test scans a fixture twice, then exercises every panel, color mode, zoom and search, failing on any JavaScript error. It skips if Google Chrome isn't installed; set `CHROME=/path/to/chrome` to use a different one.
+
 ## Notes
 
 - Speed: folders are listed with macOS's `getattrlistbulk` (one system call per batch of entries instead of one `stat` per file), and the tree is split across worker processes. The scan prints a per-phase timing line at the end. More workers than performance cores makes it *slower*, because they contend for filesystem locks.

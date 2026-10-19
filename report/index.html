@@ -100,6 +100,8 @@
 
   main { display: grid; grid-template-columns: minmax(0, 1fr) 390px; gap: 14px; min-height: 0; }
   #map { position: relative; overflow: hidden; background: #000; }
+  .layer { position: absolute; inset: 0; transform-origin: 0 0; }
+  .layer.leaving { pointer-events: none; }
   .cell { position: absolute; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding: 0 5px;
     font-size: 12.5px; line-height: 16px; color: #000; cursor: pointer; border-radius: 2px; font-weight: 500; }
   .cell.box { border-radius: 10px 0 0 0; font-weight: 600; }
@@ -379,8 +381,35 @@ function colorOf(n, o, rd, branchColor) {
 const MAXD = 3;            // levels drawn below the focused folder
 const LABEL_H = 17;
 let focus = root, selected = null, hits = new Set();
+const ZOOM_MS = 420;
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
-function render() {
+// [x, y, w, h] of `node` (or its nearest drawn ancestor) in a rendered layer
+function rectIn(layer, node) {
+  const cells = new Map([...layer.children].map(c => [c._n, c]));
+  for (let n = node; n; n = n.parent) if (cells.has(n)) return cells.get(n)._r;
+  return null;
+}
+
+// Zoom in: the clicked block grows to fill the map while the old view expands past the edges.
+// Zoom out: the old view shrinks back into its block in the parent view.
+function animateZoom(el, oldLayer, newLayer, dir, from) {
+  const r = dir === 'in' ? rectIn(oldLayer, focus) : rectIn(newLayer, from);
+  if (!r) { oldLayer.remove(); return; }
+  const W = el.clientWidth, H = el.clientHeight, [x, y, w, h] = r;
+  const sx = w / W, sy = h / H;
+  const shrink = `translate(${x}px, ${y}px) scale(${sx}, ${sy})`;   // full view → the block
+  const grow = `scale(${1 / sx}, ${1 / sy}) translate(${-x}px, ${-y}px)`;  // the block → full view
+  const opts = { duration: ZOOM_MS, easing: 'cubic-bezier(.25, .8, .25, 1)' };
+  oldLayer.classList.add('leaving');
+  if (dir === 'out') el.insertBefore(newLayer, oldLayer);
+  oldLayer.animate([{ transform: 'none', opacity: 1 }, { transform: dir === 'in' ? grow : shrink, opacity: 0 }], opts)
+    .onfinish = () => oldLayer.remove();
+  newLayer.animate([{ transform: dir === 'in' ? shrink : grow, opacity: dir === 'in' ? 0.3 : 0 },
+                    { transform: 'none', opacity: 1 }], opts);
+}
+
+function render(dir, from) {
   const el = $('#map');
   const W = el.clientWidth, H = el.clientHeight;
   const fd = focus.depth;
@@ -396,7 +425,8 @@ function render() {
 
   viewMaxAbs = 1;
   h.each(n => { if (n !== h && !n.children) viewMaxAbs = Math.max(viewMaxAbs, Math.abs(n.data.g || 0)); });
-  const frag = document.createDocumentFragment();
+  const frag = document.createElement('div');
+  frag.className = 'layer';
   const branch = new Map();
   (h.children || []).forEach((c, i) => branch.set(c, i < BRANCH.length && !c.data.o ? BRANCH[i] : MUTED));
   h.each(n => {
@@ -417,9 +447,17 @@ function render() {
     div.style.cssText = `left:${n.x0}px;top:${n.y0}px;width:${w}px;height:${ht}px;background:${fill}`;
     if (w > 28 && ht > 13) div.innerHTML = `${esc(o.data.n)}${o.data.d && !isBox ? '/' : ''}<span>${fmt(o.value)}</span>`;
     div._n = o;
+    div._r = [n.x0, n.y0, w, ht];
     frag.appendChild(div);
   });
-  el.replaceChildren(frag);
+  el.getAnimations({ subtree: true }).forEach(a => a.finish());   // a zoom still running ends now
+  const old = el.querySelector('.layer:not(.leaving)');
+  if (dir && old && !reduceMotion.matches) {
+    el.appendChild(frag);
+    animateZoom(el, old, frag, dir, from);
+  } else {
+    el.replaceChildren(frag);
+  }
   crumbs();
   document.querySelectorAll('#modes button').forEach(b => b.classList.toggle('on', b.dataset.m === mode));
   const want = '#' + encodeURIComponent(focus.path);
@@ -451,7 +489,13 @@ $('#crumbs').addEventListener('click', e => {
   const a = e.target.closest('a[data-p]'); if (a) zoom(byPath.get(a.dataset.p));
 });
 
-function zoom(n) { if (!n) return; focus = n; render(); }
+function zoom(n) {
+  if (!n || n === focus) return render();
+  const from = focus;
+  const dir = from.ancestors().includes(n) ? 'out' : n.ancestors().includes(from) ? 'in' : null;
+  focus = n;
+  render(dir, from);
+}
 function go(path) {
   const n = nodeFor(path);
   select(n);
